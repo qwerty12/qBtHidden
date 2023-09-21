@@ -10,7 +10,6 @@ Process, Priority,, B
 #Include %A_ScriptDir%\Lib\TermWait.ahk
 #Include %A_ScriptDir%\Lib\Helpers.ahk
 #Include %A_ScriptDir%\Lib\GetProcessCommandLine.ahk
-#Include %A_ScriptDir%\Lib\TrayIcon.ahk
 
 if (!DllCall("shell32\SHGetKnownFolderPath", "Ptr", GUID(FOLDERID_RoamingAppData := "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}"), "UInt", 0, "Ptr", 0, "Ptr*", RoamingAppData)) {
     WStrOut(RoamingAppData)
@@ -18,7 +17,8 @@ if (!DllCall("shell32\SHGetKnownFolderPath", "Ptr", GUID(FOLDERID_RoamingAppData
     ExitApp 1
 }
 
-qbDir := "C:\Program Files\qBittorrent"
+dllPath := A_ScriptDir . "\block-tray-icon\x64\Release\block-tray-icon.dll"
+,qbDir := "C:\Program Files\qBittorrent"
 ,qbExe := qbDir . "\qbittorrent.exe"
 ,qbCmd := """" . qbExe . """" . A_Space . """" . "--profile=" . RoamingAppData . "\qBtSonarr" . """" . A_Space . """" . "--configuration=" . """"
 
@@ -39,6 +39,15 @@ Loop, %wins%
 }
 DetectHiddenWindows Off
 
+if (FileExist(dllPath)) {
+    cbDllPath := VarSetCapacity(dllPath)
+    if (DllCall("kernel32.dll\GetBinaryTypeW", "WStr", qbExe, "UInt*", BinaryType)) {
+        if ((BinaryType == 6 && A_PtrSize == 8) || (BinaryType == 0 && A_PtrSize == 4)) {
+            LoadDll := True
+        }
+    }
+}
+
 MSGID := 0x8500
 qbPid := 0
 lpTermWaitGlobal := 0
@@ -51,9 +60,6 @@ VarSetCapacity(SYSTEM_INFO, 24 + A_PtrSize*3)
 ,OnMessage(MSGID, "AHK_TERMNOTIFY")
 ,OnExit("ExitFunc")
 ,StartQb()
-,WM_TASKBARCREATED := DllCall("RegisterWindowMessageW", "WStr", "TaskbarCreated", "UInt")
-,OnMessage(WM_TASKBARCREATED, "WM_TASKBARCREATED")
-,DllCall("ChangeWindowMessageFilterEx", "Ptr", A_ScriptHwnd, "UInt", WM_TASKBARCREATED, "UInt", MSGFLT_ALLOW := 1, "Ptr", 0)
 
 ExitFunc()
 {
@@ -77,37 +83,14 @@ AHK_TERMNOTIFY(wParam, lParam)
     SetTimer, StartQb, -5000
 }
 
-WM_TASKBARCREATED()
-{
-    global qbPid
-
-    if (!qbPid)
-        return
-
-    Loop 10
-    {
-        Sleep 1
-        if (RemoveTrayIcon(qbPid))
-            return
-    }
-}
-
-RemoveTrayIcon(dwProcessId)
-{
-    if (!dwProcessId)
-        return False
-
-    trayicon_info := TrayIcon_GetInfo(dwProcessId)
-    return trayicon_info.Length() == 1 && trayicon_info[1].process == "qbittorrent.exe" ? TrayIcon_Remove(trayicon_info[1].hwnd, trayicon_info[1].uid) : False
-}
-
 StartQb() {
-    static BELOW_NORMAL_PRIORITY_CLASS := 0x00004000, INFINITE := 0xFFFFFFFF
-    global lastTwoCoresAffinity, MSGID, lpTermWaitGlobal, cbStartupInfoEx, qbDir, qbExe, qbCmd, qbPid
+    static BELOW_NORMAL_PRIORITY_CLASS := 0x00004000, INFINITE := 0xFFFFFFFF, SW_HIDE := 0, CREATE_SUSPENDED := 0x00000004, EXTENDED_STARTUPINFO_PRESENT := 0x00080000, MEM_COMMIT := 0x00001000, PAGE_READWRITE := 0x04, MEM_RELEASE := 0x8000
+          ,LoadLibrary := DllCall("GetProcAddress", "Ptr", DllCall("GetModuleHandle", "Str", "kernel32.dll", "Ptr"), "AStr", A_IsUnicode ? "LoadLibraryW" : "LoadLibraryA", "Ptr")
+    global lastTwoCoresAffinity, MSGID, lpTermWaitGlobal, cbStartupInfoEx, qbDir, qbExe, qbCmd, qbPid, dllPath, LoadDll, cbDllPath
 
     _PROCESS_INFORMATION(pi)
-    ,_STARTUPINFOEX(si, SW_HIDE := 0)
-    ,dwCreationFlags := 0
+    ,_STARTUPINFOEX(si, SW_HIDE)
+    ,dwCreationFlags := CREATE_SUSPENDED
 
     /*
     if ((parentPid := GetParentProcessID())) {
@@ -119,7 +102,7 @@ StartQb() {
                     NumPut(hParentProcess, AttributeList, size, "Ptr")
                     if (DllCall("UpdateProcThreadAttribute", "Ptr", &AttributeList, "UInt", 0, "UPtr", PROC_THREAD_ATTRIBUTE_PARENT_PROCESS := 0x00020000, "Ptr", &AttributeList+size, "Ptr", A_PtrSize, "Ptr", 0, "Ptr", 0)) {
                         NumPut(&AttributeList, si, cbStartupInfoEx - A_PtrSize, "Ptr")
-                        ,dwCreationFlags := EXTENDED_STARTUPINFO_PRESENT := 0x00080000
+                        ,dwCreationFlags |= EXTENDED_STARTUPINFO_PRESENT
                     }
                 } else {
                     VarSetCapacity(AttributeList, 0)
@@ -130,15 +113,27 @@ StartQb() {
     */
 
     if (DllCall("CreateProcessW", "WStr", qbExe, "WStr", qbCmd, "Ptr", 0, "Ptr", 0, "Int", False, "UInt", dwCreationFlags, "Ptr", 0, "WStr", qbDir, "Ptr", &si, "Ptr", &pi)) {
-        CloseHandle(_PROCESS_INFORMATION_hThread(pi))
-        ,hProcess := _PROCESS_INFORMATION_hProcess(pi)
+        hProcess := _PROCESS_INFORMATION_hProcess(pi)
+        ,hThread := _PROCESS_INFORMATION_hThread(pi)
         ,qbPid := _PROCESS_INFORMATION_dwProcessId(pi)
 
-       lpTermWaitGlobal := TermWait_WaitForProcTerm(A_ScriptHwnd, MSGID, hProcess,, True, True)
-       ,DllCall("SetProcessAffinityMask", "Ptr", hProcess, "UPtr", lastTwoCoresAffinity)
-       ,DllCall("SetPriorityClass", "Ptr", hProcess, "UInt", BELOW_NORMAL_PRIORITY_CLASS)
-       ,DllCall("WaitForInputIdle", "Ptr", hProcess, "UInt", INFINITE, "UInt")
-       ,RemoveTrayIcon(qbPid)
+        if (LoadDll) {           
+            if ((pRemoteDllPath := DllCall("VirtualAllocEx", "Ptr", hProcess, "Ptr", 0, "Ptr", cbDllPath, "UInt", MEM_COMMIT, "UInt", PAGE_READWRITE, "Ptr"))) {
+                if (DllCall("WriteProcessMemory", "Ptr", hProcess, "Ptr", pRemoteDllPath, "Ptr", &dllPath, "Ptr", cbDllPath, "Ptr", 0)) {
+                    if (hRemoteThread := DllCall("CreateRemoteThread", "Ptr", hProcess, "Ptr", 0, "Ptr", 0, "Ptr", LoadLibrary, "Ptr", pRemoteDllPath, "UInt", 0, "Ptr", 0, "Ptr")) {
+                        DllCall("WaitForSingleObject", "Ptr", hRemoteThread, "UInt", INFINITE)
+                        ,CloseHandle(hRemoteThread)
+                    }
+                }
+                DllCall("VirtualFreeEx", "Ptr", hProcess, "Ptr", pRemoteDllPath, "Ptr", 0, "UInt", MEM_RELEASE)
+            }
+        }
+
+        lpTermWaitGlobal := TermWait_WaitForProcTerm(A_ScriptHwnd, MSGID, hProcess,, True, True)
+        ,DllCall("SetProcessAffinityMask", "Ptr", hProcess, "UPtr", lastTwoCoresAffinity)
+        ,DllCall("SetPriorityClass", "Ptr", hProcess, "UInt", BELOW_NORMAL_PRIORITY_CLASS)
+        ,DllCall("ResumeThread", "Ptr", hThread)
+        ,CloseHandle(hThread)
     } else {
         ExitApp 1
     }

@@ -1,0 +1,1 @@
+To build, `git clone https://github.com/microsoft/Detours.git` and place [msvcrt.lib](https://github.com/neosmart/msvcrt.lib/releases) into the block-tray-icon folder.
